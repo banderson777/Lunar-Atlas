@@ -1,4 +1,6 @@
 import * as T from './three.mjs';
+import { LocalTerrain } from './terrain.mjs';
+import { destination, measure, validateView } from './navigation.mjs';
 
 const $ = id => document.getElementById(id);
 const rad = Math.PI / 180;
@@ -69,6 +71,7 @@ const sunlight = new T.DirectionalLight(0xfff1dc,2.1);
 scene.add(ambient,sunlight);
 
 let dem, terrainReady=false;
+let localTerrain;
 function updateTerrain() {
   for(let i=0;i<positions.count;i++){
     const r=radius+($('relief').checked?heights[i]:0);
@@ -78,6 +81,7 @@ function updateTerrain() {
   positions.needsUpdate=true;
   shape.computeVertexNormals();
   shape.computeBoundingSphere();
+  if(localTerrain)localTerrain.key="";
   resetSurfaceHeight();
 }
 function elevation(lat,lon){
@@ -110,6 +114,7 @@ const markers = sites.map(([name,lat,lon],i)=>{
   const label=document.createElement('span');
   label.className='feature';
   label.textContent=name;
+  label.dataset.feature=name;
   $('annotations').append(label);
   return {label,lat,lon,normal:point(lat,lon)};
 });
@@ -126,8 +131,10 @@ const missionFlags={
 };
 const missionMarkers=[];
 let missionCatalog=[];
+let restoredCountry="";
 function openMissionMedia(mission){
   $('mission-media-title').textContent=mission.name+' — Pictures and videos';
+  $('mission-media-intro').textContent='Explore mission imagery and videos using these sources. Search results may include related missions or artist illustrations.';
   const container=$('mission-media-links');
   container.replaceChildren();
   const missionName=mission.name.split(': ').slice(1).join(': ');
@@ -235,7 +242,9 @@ $('missions').onchange=()=>{
   for(const marker of missionMarkers)marker.label.hidden=true;
 };
 function matchesMission(mission){
-  return (!$('mission-country').value || mission.country===$('mission-country').value) &&
+  const query=$('mission-search').value.trim().toLowerCase();
+  const text=[mission.name,mission.country,mission.date,mission.outcome,mission.status].join(' ').toLowerCase();
+  return (!query || query.split(/\s+/).every(word=>text.includes(word))) && (!$('mission-country').value || mission.country===$('mission-country').value) &&
     (!$('mission-clps').checked || mission.clps);
 }
 function filterMissions(){
@@ -254,6 +263,7 @@ function filterMissions(){
   if(!retained)$('mission-info').replaceChildren();
   $('mission-count').textContent=total+' entries · '+mapped+' mapped · '+(total-mapped)+' listed without coordinates';
 }
+$('mission-search').oninput=filterMissions;
 $('mission-country').onchange=$('mission-clps').onchange=filterMissions;
 $('mission-flags').onchange=()=>{
   for(const marker of missionMarkers)marker.flag.hidden=!$('mission-flags').checked;
@@ -266,6 +276,7 @@ fetch('./missions.json?v=missions-8').then(response=>{
   return response.json();
 }).then(catalog=>{
   missionCatalog=catalog.missions;
+  $('catalog-date').textContent='Catalog checked '+catalog.checked;
   for(const [index,mission] of missionCatalog.entries()){
     const located=mission.lat!==null;
 
@@ -294,6 +305,7 @@ fetch('./missions.json?v=missions-8').then(response=>{
   for(const country of [...new Set(missionCatalog.map(m=>m.country))].sort()){
     $('mission-country').add(new Option(country,country));
   }
+  if(restoredCountry)$('mission-country').value=restoredCountry;
   filterMissions();
 }).catch(()=>{
   $('mission-count').textContent='Mission catalog unavailable. Reload to retry.';
@@ -314,12 +326,41 @@ const stars=[
   scene.add(star);
   return {star,j2000:vec(Math.cos(dec*rad)*Math.cos(ra*15*rad),Math.cos(dec*rad)*Math.sin(ra*15*rad),Math.sin(dec*rad))};
 });
+let catalogSky;
+fetch('./stars.json').then(response=>{
+  if(!response.ok)throw Error('Star catalog unavailable');
+  return response.json();
+}).then(rows=>{
+  const coordinates=[],magnitudes=[];
+  for(const [ra,dec,magnitude] of rows){
+    coordinates.push(Math.cos(dec*rad)*Math.cos(ra*rad)*210000000,
+      Math.cos(dec*rad)*Math.sin(ra*rad)*210000000,Math.sin(dec*rad)*210000000);
+    magnitudes.push(magnitude);
+  }
+  const geometry=new T.BufferGeometry();
+  geometry.setAttribute('position',new T.Float32BufferAttribute(coordinates,3));
+  geometry.setAttribute('magnitude',new T.Float32BufferAttribute(magnitudes,1));
+  const material=new T.PointsMaterial({color:0xe4edff,size:2,sizeAttenuation:false});
+  material.onBeforeCompile=shader=>{
+    shader.vertexShader='attribute float magnitude;\n'+shader.vertexShader.replace(
+      'gl_PointSize = size;','gl_PointSize = clamp(3.2 - 0.4 * magnitude, 0.8, 4.0);');
+  };
+  catalogSky=new T.Points(geometry,material);
+  catalogSky.matrixAutoUpdate=false;
+  catalogSky.frustumCulled=false;
+  scene.add(catalogSky);
+  for(const {star} of stars){scene.remove(star);star.geometry.dispose();star.material.dispose();}
+  $('sky-quality').textContent=rows.length.toLocaleString()+' catalogued stars · J2000 positions; proper motion omitted';
+  skyTime=undefined;
+}).catch(()=>{$('sky-quality').textContent='Small bright-star fallback active; catalog could not load';});
+
 const earth = new T.Mesh(new T.SphereGeometry(6371,32,24),new T.MeshLambertMaterial({color:0x458bd5}));
 const sun = new T.Mesh(new T.SphereGeometry(696340,32,24),new T.MeshBasicMaterial({color:0xffecc1}));
 scene.add(earth,sun);
 let time=Date.now(),live=false,map=true,fly=false,skyTime;
 let mode='orbit',latitude=0.674,longitude=23.473,orbitLat=13,orbitLon=14;
 let orbitAxis;
+let eyeHeight=1.7;
 let altitude=3500,heading=90,pitch=1,roll=0,surfaceHeight=radius+0.0017;
 const raycaster = new T.Raycaster();
 function resetSurfaceHeight(){
@@ -327,8 +368,8 @@ function resetSurfaceHeight(){
   const normal=point(latitude,longitude);
   globe.updateMatrixWorld(true);
   raycaster.set(normal.clone().multiplyScalar(radius+30),normal.clone().negate());
-  const hit=raycaster.intersectObject(globe)[0];
-  surfaceHeight=(hit?hit.point.length():radius)+0.0017;
+  const hit=(localTerrain?localTerrain.hits(raycaster):raycaster.intersectObject(globe))[0];
+  surfaceHeight=(hit?hit.point.length():radius)+eyeHeight/1000;
 }
 function updateSky(epoch){
   if(epoch===skyTime)return;
@@ -340,6 +381,9 @@ function updateSky(epoch){
   const origin=vec(0,0,1).cross(pole).normalize().applyAxisAngle(pole,axis.spin*rad);
   const east=pole.clone().cross(origin);
   const lunar=p=>vec(origin.dot(p),pole.dot(p),-east.dot(p));
+  if(catalogSky){
+    catalogSky.matrix.set(origin.x,origin.y,origin.z,0,pole.x,pole.y,pole.z,0,-east.x,-east.y,-east.z,0,0,0,0,1);
+  }
   const moon=A.GeoVector(A.Body.Moon,date,false);
   const solar=A.GeoVector(A.Body.Sun,date,true);
   const earthVector=lunar(vec(-moon.x,-moon.y,-moon.z));
@@ -350,13 +394,13 @@ function updateSky(epoch){
   for(const {star,j2000} of stars) star.position.copy(lunar(j2000)).multiplyScalar(210000000);
 }
 function setTime(epoch){
-  time=epoch;
-  $('clock').value=new Date(epoch).toISOString().slice(0,16);
+  time=clamp(epoch,-2208988800000,4133980799999);
+  $('clock').value=new Date(time).toISOString().slice(0,16);
 }
 function toggle(id,on){$(id).setAttribute('aria-pressed',String(on));}
 function selectLocation(lat,lon){
   selectedPin.visible=false;
-  latitude=lat;
+  latitude=clamp(lat,-90,90);
   longitude=wrap(lon);
   orbitLat=lat;
   orbitLon=longitude;
@@ -399,6 +443,7 @@ for(const button of document.querySelectorAll('[data-mode]'))button.onclick=()=>
   camera.fov=45;
   camera.updateProjectionMatrix();
   $('fly').disabled=mode==='surface';
+  $('surface-controls').hidden=mode!=='surface';
   if(mode==='surface')loadCloseupImagery();
   $('mode').textContent=mode==='orbit'?'ORBITAL VIEW':'SURFACE VIEW';
   roll=0;
@@ -448,11 +493,12 @@ function pickLocation(event){
     (event.clientX-bounds.left)/bounds.width*2-1,
     1-(event.clientY-bounds.top)/bounds.height*2
   ),camera);
-  const hit=pickRay.intersectObject(globe)[0];
+  const hit=(localTerrain?localTerrain.hits(pickRay):pickRay.intersectObject(globe))[0];
   if(!hit)return;
   const normal=hit.point.clone().normalize();
   const lat=Math.asin(clamp(normal.y,-1,1))/rad;
   const lon=wrap(Math.atan2(-normal.z,normal.x)/rad);
+  if($('measure').checked){addMeasurement({lat,lon});return;}
   $('lat').value=lat.toFixed(5);
   $('lon').value=lon.toFixed(5);
   $('site').selectedIndex=-1;
@@ -492,6 +538,8 @@ view.addEventListener('wheel',e=>{e.preventDefault();zoom(e.deltaY>0?1.12:0.89);
 view.onkeydown=e=>{
   const delta={ArrowLeft:[-20,0],ArrowRight:[20,0],ArrowUp:[0,-20],ArrowDown:[0,20]}[e.key];
   if(delta){e.preventDefault();rotate(...delta,e.shiftKey);}
+  const walking={w:0,a:-90,s:180,d:90}[e.key.toLowerCase()];
+  if(mode==='surface' && walking!==undefined){e.preventDefault();walk(walking);}
   if(e.key==='+'||e.key==='-'){e.preventDefault();zoom(e.key==='+'?0.78:1.28);}
 };
 
@@ -542,6 +590,136 @@ iceLabel.textContent='LCROSS · water detected (illustrative extent)';
 iceLabel.hidden=true;
 $('annotations').append(iceLabel);
 
+localTerrain=new LocalTerrain(scene,globe,elevation,resetSurfaceHeight,message=>{
+  if(!graphicsLost)$('status').textContent=message;
+});
+const resourceUniforms={ map:{value:base},mode:{value:0} };
+function resourceMaterial(material){
+  const previous=material.onBeforeCompile;
+  material.onBeforeCompile=shader=>{
+    previous.call(material,shader);
+    shader.uniforms.resourceMap=resourceUniforms.map;
+    shader.uniforms.resourceMode=resourceUniforms.mode;
+    shader.vertexShader='varying vec3 resourcePosition;\n'+shader.vertexShader.replace(
+      '#include <begin_vertex>','#include <begin_vertex>\nresourcePosition=position;');
+    shader.fragmentShader='varying vec3 resourcePosition;\nuniform sampler2D resourceMap;\nuniform float resourceMode;\n'+shader.fragmentShader.replace(
+      '#include <map_fragment>',`#include <map_fragment>
+      if(resourceMode>0.5){
+        vec3 p=normalize(resourcePosition);
+        float lat=asin(clamp(p.y,-1.0,1.0));
+        float lon=atan(-p.z,p.x);
+        vec2 uv=vec2(lon/6.28318530718+0.5,lat/3.14159265359+0.5);
+        bool valid=true;
+        if(resourceMode>1.5){
+          float rho=2.0*1737400.0*tan(0.78539816339+lat/2.0);
+          uv=vec2(rho*sin(lon),rho*cos(lon))/2191860.0+0.5;
+          valid=lat<0.0 && all(greaterThanEqual(uv,vec2(0.0))) && all(lessThanEqual(uv,vec2(1.0)));
+        }
+        if(valid){
+          vec4 abundanceColor=texture2D(resourceMap,uv);
+          diffuseColor.rgb=mix(diffuseColor.rgb,abundanceColor.rgb,abundanceColor.a*0.85);
+        }
+      }`);
+  };
+  material.needsUpdate=true;
+}
+resourceMaterial(globe.material);
+resourceMaterial(localTerrain.mesh.material);
+let resourceGeneration=0,resourceTexture,restoreResource=false;
+$('resource').onchange=()=>{
+  const value=$('resource').value;
+  const skipFocus=restoreResource;restoreResource=false;
+  if(value==='hydrogen' && !skipFocus)$('ice-focus').click();
+  const generation=++resourceGeneration;
+  resourceUniforms.mode.value=0;
+  if(resourceTexture){resourceTexture.dispose();resourceTexture=null;}
+  const description={
+    titanium:'Clementine TiO₂ abundance visualization, derived from multispectral measurements. Global preview resampled to ≈5.3 km/pixel at the equator.',
+    iron:'Clementine FeO abundance visualization, derived from multispectral measurements. Global preview resampled to ≈5.3 km/pixel at the equator.',
+    hydrogen:'Lunar Prospector reconstructed water-equivalent hydrogen visualization. Bundled preview ≈2.1 km/pixel; sensing footprint and uncertainty vary. Hydrogen signals can have several causes.'
+  };
+  const layer={titanium:'Clem_UVVIS_TiO2_Clr_Global_152ppd',iron:'Clem_UVVIS_FeO_Clr_Global_152ppd',hydrogen:'sp_weh_5km_adapt.map_clr'};
+  $('resource-info').replaceChildren();
+  if(!value)return;
+  $('resource-info').textContent='Loading resource map…';
+  new T.TextureLoader().load('./'+value+'.webp',texture=>{
+    if(generation!==resourceGeneration){texture.dispose();return;}
+    resourceTexture=texture;
+    texture.colorSpace=T.SRGBColorSpace;
+    resourceUniforms.map.value=texture;
+    resourceUniforms.mode.value=value==='hydrogen'?2:1;
+    $('resource-info').textContent=description[value]+' Published color visualization blended with terrain. Refer to source metadata for calibration and uncertainty.';
+    const link=document.createElement('a');
+    link.textContent='NASA product metadata';
+    link.target='_blank';link.rel='noopener';
+    link.href='https://trek.nasa.gov/moon/TrekWS/rest/cat/metadata/fgdc/html?label='+encodeURIComponent(layer[value]);
+    $('resource-info').append(link);
+
+  },undefined,()=>{
+    if(generation===resourceGeneration)$('resource-info').textContent='Resource map unavailable. Reload to retry.';
+  });
+};
+const grid=new T.Group();
+const gridMaterial=new T.LineBasicMaterial({color:0x79b9d6,transparent:true,opacity:0.28,depthWrite:false});
+for(let latitude=-75;latitude<=75;latitude+=15){
+  const points=[];
+  for(let longitude=-180;longitude<=180;longitude+=2)points.push(point(latitude,longitude).multiplyScalar(radius+12));
+  grid.add(new T.Line(new T.BufferGeometry().setFromPoints(points),gridMaterial));
+}
+for(let longitude=-180;longitude<180;longitude+=15){
+  const points=[];
+  for(let latitude=-90;latitude<=90;latitude+=2)points.push(point(latitude,longitude).multiplyScalar(radius+12));
+  grid.add(new T.Line(new T.BufferGeometry().setFromPoints(points),gridMaterial));
+}
+grid.visible=false;scene.add(grid);
+$('grid').onchange=()=>{grid.visible=$('grid').checked;};
+let lastTerrainUpdate=0;
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=T.PCFSoftShadowMap;
+sunlight.castShadow=false;
+sunlight.shadow.mapSize.set(1024,1024);
+sunlight.shadow.bias=-0.0001;
+sunlight.shadow.normalBias=0.001;
+$('shadows').onchange=()=>{sunlight.castShadow=$('shadows').checked;};
+function walk(offset){
+  const next=destination(latitude,longitude,heading+offset,Number($('step').value)/1000);
+  selectLocation(next.lat,next.lon);
+}
+for(const button of document.querySelectorAll('[data-move]'))button.onclick=()=>walk(Number(button.dataset.move));
+$('eye-height').onchange=()=>{
+  eyeHeight=clamp(Number($('eye-height').value)||1.7,1,100);
+  $('eye-height').value=eyeHeight;
+  resetSurfaceHeight();
+};
+
+let measurementPoints=[];
+let measurementLine;
+function addMeasurement(p){
+  if(measurementPoints.length===2)measurementPoints=[];
+  measurementPoints.push(p);
+  if(measurementLine){scene.remove(measurementLine);measurementLine.geometry.dispose();measurementLine.material.dispose();measurementLine=null;}
+  if(measurementPoints.length===1){
+    $('measurement').textContent='Start '+p.lat.toFixed(3)+'°, '+p.lon.toFixed(3)+'°. Click an endpoint.';
+    return;
+  }
+  const [a,b]=measurementPoints;
+  const result=measure(a,b);
+  $('measurement').textContent=result.distance.toFixed(3)+' km along reference sphere'+
+    (result.bearing===null?'':' · initial bearing '+result.bearing.toFixed(1)+'°');
+  const vertices=[];
+  for(let i=0;i<=128;i++){
+    const pos=destination(a.lat,a.lon,result.bearing||0,result.distance*i/128);
+    vertices.push(point(pos.lat,pos.lon).multiplyScalar(radius+12));
+  }
+  measurementLine=new T.Line(new T.BufferGeometry().setFromPoints(vertices),new T.LineBasicMaterial({color:0xffef7d}));
+  scene.add(measurementLine);
+}
+$('measure-clear').onclick=()=>{
+  measurementPoints=[];
+  if(measurementLine){scene.remove(measurementLine);measurementLine.geometry.dispose();measurementLine.material.dispose();measurementLine=null;}
+  $('measurement').textContent='Click two terrain points to measure.';
+};
+
 let graphicsLost=false;
 renderer.domElement.addEventListener('webglcontextlost',event=>{
   event.preventDefault();
@@ -552,6 +730,216 @@ renderer.domElement.addEventListener('webglcontextrestored',()=>{
   graphicsLost=false;
   $('status').textContent=terrainReady?'NASA LROC / LOLA · approx. 30 km equatorial mesh':'Elevation data unavailable';
 });
+
+const clusterPool=[];
+function clusterButton(index){
+  if(!clusterPool[index]){
+    const button=document.createElement('button');
+    button.className='cluster-marker';
+    button.type='button';
+    $('annotations').append(button);
+    clusterPool.push(button);
+  }
+  return clusterPool[index];
+}
+function projectMarker(marker,w,h){
+  const height=$('relief').checked?(localTerrain?localTerrain.sample(marker.lat,marker.lon):elevation(marker.lat,marker.lon)):0;
+  const p=marker.normal.clone().multiplyScalar(radius+height+0.05);
+  if(p.clone().sub(camera.position).dot(marker.normal)>=0)return null;
+  if(mode==='surface'){
+    const direction=p.clone().sub(camera.position);
+    const distance=direction.length();
+    pickRay.set(camera.position,direction.normalize());
+    const obstruction=localTerrain.hits(pickRay)[0];
+    if(obstruction && obstruction.distance<distance-0.1)return null;
+  }
+  p.project(camera);
+  if(Math.abs(p.x)>1 || Math.abs(p.y)>1 || p.z>1 || p.z< -1)return null;
+  return {x:(p.x+1)*w/2,y:(1-p.y)*h/2,marker};
+}
+function layoutMarkers(w,h){
+  for(const button of clusterPool)button.hidden=true;
+  const projected=[];
+  for(const marker of [...markers,...missionMarkers]){
+    marker.label.hidden=true;
+    if(!(marker.mission?$('missions').checked && matchesMission(marker.mission):$('labels').checked))continue;
+    const projection=projectMarker(marker,w,h);
+    if(projection)projected.push(projection);
+  }
+  const groups=[];
+  for(const candidate of projected.filter(p=>p.marker.mission)){
+    if(candidate.marker.label.classList.contains('selected')){
+      candidate.marker.label.hidden=false;
+      candidate.marker.label.style.left=candidate.x+'px';
+      candidate.marker.label.style.top=candidate.y+'px';
+      continue;
+    }
+    const group=groups.find(group=>Math.abs(group.x-candidate.x)<190 && Math.abs(group.y-candidate.y)<28);
+    if(group)group.members.push(candidate);
+    else groups.push({x:candidate.x,y:candidate.y,members:[candidate]});
+  }
+  const occupied=[];
+  for(const candidate of projected.filter(p=>p.marker.label.classList.contains('selected'))){
+    occupied.push({x:candidate.x,y:candidate.y,width:candidate.marker.label.offsetWidth||160});
+  }
+  let clusterIndex=0;
+  for(const group of groups){
+    if(group.members.length>1){
+      const button=clusterButton(clusterIndex++);
+      button.hidden=false;
+      button.textContent=group.members.length+' missions';
+      button.style.left=group.x+'px';button.style.top=group.y+'px';
+      button.onclick=()=>{
+        const dialog=$('mission-media');
+        $('mission-media-title').textContent='Missions in this area';
+        $('mission-media-intro').textContent='Choose a mission to center its location and view its details.';
+        $('mission-media-links').replaceChildren();
+        for(const {marker} of group.members){
+          const choice=document.createElement('button');
+          choice.textContent=marker.mission.name;
+          choice.onclick=()=>{
+            dialog.close();
+            document.querySelector('[data-mode="orbit"]').click();
+            showMission(missionCatalog.indexOf(marker.mission));
+            altitude=200;camera.fov=45;camera.updateProjectionMatrix();
+          };
+          $('mission-media-links').append(choice);
+        }
+        dialog.showModal();
+      };
+      occupied.push({x:group.x-30,y:group.y,width:90});
+    }else{
+      const candidate=group.members[0];
+      candidate.marker.label.hidden=false;
+      candidate.marker.label.style.left=candidate.x+'px';
+      candidate.marker.label.style.top=candidate.y+'px';
+      occupied.push({x:candidate.x,y:candidate.y,width:candidate.marker.label.offsetWidth||180});
+    }
+  }
+  // Natural feature labels yield space to mission labels and each other.
+  for(const candidate of projected.filter(p=>!p.marker.mission)){
+    const width=candidate.marker.label.offsetWidth||110;
+    const collides=occupied.some(p=>Math.abs(p.y-candidate.y)<23 && candidate.x<p.x+p.width+8 && candidate.x+width>p.x-8);
+    if(collides)continue;
+    candidate.marker.label.hidden=false;
+    candidate.marker.label.style.left=candidate.x+'px';
+    candidate.marker.label.style.top=candidate.y+'px';
+    occupied.push({x:candidate.x,y:candidate.y,width});
+  }
+}
+function updateScale(w,h){
+  const start=new T.Vector2(-0.6,-0.55);
+  const end=new T.Vector2(start.x+200/w,start.y);
+  pickRay.setFromCamera(start,camera);
+  const a=localTerrain.hits(pickRay)[0];
+  pickRay.setFromCamera(end,camera);
+  const b=localTerrain.hits(pickRay)[0];
+  $('scale').hidden=!a || !b;
+  if(!a || !b)return;
+  const coordinates=p=>({lat:Math.asin(p.clone().normalize().y)/rad,lon:wrap(Math.atan2(-p.z,p.x)/rad)});
+  const distance=measure(coordinates(a.point),coordinates(b.point)).distance;
+  if(!Number.isFinite(distance) || distance<0.000001){$('scale').hidden=true;return;}
+  const magnitude=10**Math.floor(Math.log10(distance));
+  const nice=[1,2,5,10].map(n=>n*magnitude).filter(n=>n<=distance).pop();
+  $('scale-line').style.width=(nice/distance*100)+'px';
+  $('scale-label').textContent=(nice<1?Math.round(nice*1000)+' m':nice.toPrecision(2).replace(/\.0$/,'')+' km')+' · reference sphere';
+}
+
+const viewStorage='lunar-atlas-viewpoints-v1';
+const layerIds=['relief','labels','ice','metal','missions','mission-flags','grid','shadows'];
+let savedViews=[];
+function captureView(){
+  return {
+    version:1,mode,latitude,longitude,orbitLat,orbitLon,altitude,heading,pitch,roll,
+    fov:camera.fov,eyeHeight,time,map,resource:$('resource').value,
+    detail:$('detail-terrain').checked,
+    filters:{country:$('mission-country').value,clps:$('mission-clps').checked,query:$('mission-search').value,visible:$('mission-filters').checked},
+    layers:Object.fromEntries(layerIds.map(id=>[id,$(id).checked]))
+  };
+}
+function applyView(value){
+  if(!validateView(value))throw Error('Invalid viewpoint');
+  document.querySelector('[data-mode="'+value.mode+'"]').click();
+  latitude=value.latitude;longitude=value.longitude;orbitLat=value.orbitLat;orbitLon=value.orbitLon;
+  altitude=value.altitude;heading=value.heading;pitch=value.pitch;roll=value.roll;eyeHeight=value.eyeHeight;
+  camera.fov=value.fov;camera.updateProjectionMatrix();orbitAxis=undefined;
+  fly=false;live=false;toggle('fly',false);toggle('live',false);
+  map=value.map;toggle('map',map);setTime(value.time);
+  for(const id of layerIds)$(id).checked=value.layers[id];
+  $('detail-terrain').checked=value.detail!==false;
+  $('eye-height').value=eyeHeight;
+  const filters=value.filters || {};
+  restoredCountry=typeof filters.country==='string'?filters.country:'';
+  $('mission-country').value=restoredCountry;
+  $('mission-clps').checked=filters.clps===true;
+  $('mission-search').value=typeof filters.query==='string'?filters.query:'';
+  $('mission-filters').checked=filters.visible===true;
+  $('mission-filter-controls').hidden=!$('mission-filters').checked;
+  filterMissions();
+  $('lat').value=latitude;$('lon').value=longitude;
+  $('relief').onchange();$('ice').onchange();$('metal').onchange();$('grid').onchange();
+  $('shadows').onchange();$('missions').onchange();$('mission-flags').onchange();
+  const resource=['','titanium','iron','hydrogen'].includes(value.resource)?value.resource:'';
+  // Restoring a view must preserve its camera, even when a polar overlay is enabled.
+  $('resource').value=resource;
+  restoreResource=true;
+  $('resource').onchange();
+  resetSurfaceHeight();
+}
+function populateSavedViews(){
+  $('saved-views').replaceChildren(new Option('Saved viewpoints',''));
+  savedViews.forEach((entry,index)=>$('saved-views').add(new Option(entry.name,index)));
+}
+try{
+  const stored=JSON.parse(localStorage.getItem(viewStorage)||'[]');
+  if(Array.isArray(stored))savedViews=stored.filter(entry=>entry && typeof entry.name==='string' && validateView(entry.view));
+}catch{$('view-message').textContent='Saved viewpoints could not be read in this browser.';}
+populateSavedViews();
+function storeViews(){
+  try{localStorage.setItem(viewStorage,JSON.stringify(savedViews));return true;}
+  catch{$('view-message').textContent='Browser storage unavailable. Use Copy link to keep this view.';return false;}
+}
+$('save-view').onclick=()=>{
+  const name=$('view-name').value.trim() || (mode==='surface'?'Surface':'Orbit')+' '+latitude.toFixed(2)+'°, '+longitude.toFixed(2)+'°';
+  const entry={name,view:captureView()};
+  const index=savedViews.findIndex(item=>item.name===name);
+  if(index<0)savedViews.push(entry);else savedViews[index]=entry;
+  if(storeViews()){$('view-message').textContent='Saved '+name;populateSavedViews();}
+};
+$('saved-views').onchange=()=>{
+  const index=$('saved-views').value;
+  if(index==='')return;
+  applyView(savedViews[Number(index)].view);
+  $('view-name').value=savedViews[Number(index)].name;
+  $('view-message').textContent='Viewpoint restored.';
+};
+$('delete-view').onclick=()=>{
+  const index=$('saved-views').value;
+  if(index==='')return;
+  savedViews.splice(Number(index),1);
+  if(storeViews()){populateSavedViews();$('view-message').textContent='Viewpoint deleted.';}
+};
+$('share-view').onclick=async()=>{
+  const url=new URL(location.href);
+  url.hash='view='+encodeURIComponent(JSON.stringify(captureView()));
+  try{
+    await navigator.clipboard.writeText(url.href);
+    $('view-message').textContent='Viewpoint link copied. It opens on a host serving the atlas.';
+  }catch{
+    const link=document.createElement('a');
+    link.href=url.href;link.textContent='Open this viewpoint link';
+    $('view-message').replaceChildren(link);
+  }
+};
+function restoreHash(){
+  if(!location.hash.startsWith('#view='))return;
+  try{
+    applyView(JSON.parse(decodeURIComponent(location.hash.slice(6))));
+    $('view-message').textContent='Shared viewpoint restored.';
+  }catch{$('view-message').textContent='This viewpoint link is invalid or unsupported.';}
+}
+window.addEventListener('hashchange',restoreHash);
+restoreHash();
 
 let lastFrame=performance.now();
 function frame(now){
@@ -570,6 +958,12 @@ function frame(now){
     radial.applyAxisAngle(orbitAxis,speed*dt);
     orbitLat=Math.asin(clamp(radial.y,-1,1))/rad;
     orbitLon=Math.atan2(-radial.z,radial.x)/rad;
+  }
+  if(now-lastTerrainUpdate>600){
+    lastTerrainUpdate=now;
+    localTerrain.update(mode==='orbit'?orbitLat:latitude,mode==='orbit'?orbitLon:longitude,
+      altitude,mode==='surface',$('relief').checked,$('detail-terrain').checked)
+      .catch(()=>{$('status').textContent='Local terrain unavailable; global terrain active';});
   }
   const lat=mode==='orbit'?orbitLat:latitude;
   const lon=mode==='orbit'?orbitLon:longitude;
@@ -594,21 +988,23 @@ function frame(now){
     const scale=distance*Math.tan(camera.fov*rad/2)*0.009;
     selectedPin.scale.setScalar(scale);
   }
+  if(sunlight.castShadow){
+    const target=up.clone().multiplyScalar(radius);
+    sunlight.target.position.copy(target);scene.add(sunlight.target);
+    sunlight.position.copy(target).addScaledVector(sun.position.clone().normalize(),1500);
+    const shadow=sunlight.shadow.camera;
+    shadow.left=shadow.bottom=-150;shadow.right=shadow.top=150;shadow.near=1;shadow.far=3000;shadow.updateProjectionMatrix();
+  }
   camera.rotateZ(roll*rad);
   camera.updateMatrixWorld();
+  if(catalogSky){catalogSky.matrix.setPosition(camera.position);catalogSky.updateMatrixWorld(true);}
   $('needle').style.transform='rotate('+(-bearing)+'deg)';
   $('bearing').value=String((Math.round(bearing)%360+360)%360).padStart(3,'0')+'°';
   const sunAltitude=Math.asin(sun.position.clone().sub(camera.position).normalize().dot(up))/rad;
   $('position').textContent=lat.toFixed(2)+'° lat  /  '+lon.toFixed(2)+'° lon  ·  '+(mode==='orbit'?altitude.toFixed(0)+' km':'Sun '+sunAltitude.toFixed(1)+'°')+'  ·  '+camera.fov.toFixed(0)+'° FOV';
   const w=view.clientWidth,h=view.clientHeight;
-  for(const {label,lat:markLat,lon:markLon,normal,mission} of [...markers,...missionMarkers]){
-    const height=$('relief').checked && terrainReady?elevation(markLat,markLon):0;
-    const p=normal.clone().multiplyScalar(radius+height+0.05);
-    const visible=p.clone().sub(camera.position).dot(normal)<0;
-    p.project(camera);
-    label.hidden=!(mission?$('missions').checked && matchesMission(mission):$('labels').checked)||!visible||Math.abs(p.x)>1||Math.abs(p.y)>1||p.z>1||p.z< -1;
-    if(!label.hidden){label.style.left=(p.x+1)*w/2+'px';label.style.top=(1-p.y)*h/2+'px';}
-  }
+  updateScale(w,h);
+  layoutMarkers(w,h);
   const icePosition=iceNormal.clone().multiplyScalar(radius+0.2);
   const iceVisible=$('ice').checked && icePosition.clone().sub(camera.position).dot(iceNormal)<0;
   icePatch.visible=iceVisible;

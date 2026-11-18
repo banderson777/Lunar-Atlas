@@ -1,23 +1,31 @@
 <!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Lunar Surface Atlas</title>
-<link rel="stylesheet" href="style.css?v=missions-8">
+<link rel="stylesheet" href="style.css?v=navigation-2">
 <header><span class="logo">◐</span><div><strong>LUNAR ATLAS</strong><small>MOON EXPLORATION</small></div><span class="badge">EXPLORATION PREVIEW</span></header>
 <main><aside>
 <h1>Lunar surface</h1>
 <div class="segment"><button data-mode="orbit" aria-pressed="true">Orbit</button><button data-mode="surface" aria-pressed="false">Surface</button></div>
 <h2>MAP LAYERS</h2>
 <label><i class="swatch terrain"></i>Elevation<input id="relief" type="checkbox" checked></label>
+<label>Detailed local terrain<input id="detail-terrain" type="checkbox" checked></label>
+<label>Coordinate grid<input id="grid" type="checkbox"></label>
 <label><i class="swatch names"></i>Feature names<input id="labels" type="checkbox" checked></label>
 <label><i class="swatch ice"></i>Water ice evidence<input id="ice" type="checkbox"></label>
 <div id="ice-info" hidden><button id="ice-focus" type="button">View south-pole ice evidence</button><p>Cyan marks LCROSS water detection at Cabeus. Highlight extent is illustrative. <a href="https://science.nasa.gov/mission/lcross/" target="_blank" rel="noopener">NASA evidence</a></p></div>
-<label><i class="swatch metal"></i>Titanium indicators<input id="metal" type="checkbox"></label>
+<label><i class="swatch metal"></i>Titanium reference regions<input id="metal" type="checkbox"></label>
+<label for="resource">Measured resource map</label>
+<select id="resource"><option value="">None</option><option value="titanium">TiO₂ · Clementine</option><option value="iron">FeO · Clementine</option><option value="hydrogen">Polar hydrogen · Lunar Prospector</option></select>
+<p id="resource-info" class="help" role="status"></p>
+<label>Terrain shadows<input id="shadows" type="checkbox"></label>
 <h2>MISSIONS</h2>
 <label><i class="swatch mission"></i>Show mission sites<input id="missions" type="checkbox" checked></label>
 <label>National flags on map<input id="mission-flags" type="checkbox"></label>
 <label>Show mission filters<input id="mission-filters" type="checkbox"></label>
 <section id="mission-panel">
 <button id="blue-ghost-focus" type="button">Find Firefly: Blue Ghost 1</button>
+<input id="mission-search" type="search" aria-label="Search missions" placeholder="Mission, operator, year, outcome">
+<p id="catalog-date" class="help"></p>
 <p id="mission-count" role="status">Loading mission catalog…</p>
 <p class="mission-legend">● Landing / rover &nbsp; <span>◆ Impact</span> &nbsp; <b>✚ CLPS</b></p>
 <div id="mission-filter-controls" hidden>
@@ -28,21 +36,38 @@
 <div id="mission-info" aria-live="polite"></div>
 <p class="mission-help">Estimated sites are marked ≈. Unknown sites, planned deliveries, and missions that did not reach the Moon appear in the list. Dates and targets for future missions may change. Historical sites are shown regardless of sky time.</p>
 </section>
+<h2>NAVIGATION</h2>
+<label>Measure between clicks<input id="measure" type="checkbox"></label>
+<output id="measurement" aria-live="polite">Click two terrain points to measure.</output>
+<button id="measure-clear" type="button">Clear measurement</button>
+<div id="surface-controls" hidden>
+<label>Eye height (m)<input id="eye-height" type="number" min="1" max="100" value="1.7" step="0.1"></label>
+<label>Step (m)<select id="step"><option value="10">10</option><option value="100" selected>100</option><option value="1000">1,000</option></select></label>
+<div class="movement"><button data-move="0" aria-label="Walk forward">Forward</button><button data-move="-90" aria-label="Walk left">Left</button><button data-move="90" aria-label="Walk right">Right</button><button data-move="180" aria-label="Walk backward">Back</button></div>
+<p class="help">W/A/S/D walk when the view has focus. Drag to look.</p>
+</div>
 <h2>LOCATION</h2>
 <select id="site" aria-label="Lunar feature"></select>
 <form id="coordinates"><label>Latitude<input id="lat" type="number" min="-90" max="90" step="any" required></label><label>Longitude<input id="lon" type="number" min="-180" max="180" step="any" required></label><button type="submit">Go to coordinates</button></form>
-<details><summary>Data and limitations</summary><p><a href="https://svs.gsfc.nasa.gov/4720/" target="_blank" rel="noopener">NASA SVS · LROC and LOLA</a></p><p><a href="https://svs.gsfc.nasa.gov/3654/" target="_blank" rel="noopener">NASA · LCROSS impact site</a></p><p><a href="https://www.lpi.usra.edu/lunar/missions/clementine/data/" target="_blank" rel="noopener">LPI · Clementine composition</a></p><p>Selected sites and indicative resource highlights. Sky and orbit are approximate. For exploration only.</p></details>
+<h2>VIEWPOINTS</h2>
+<input id="view-name" maxlength="60" placeholder="Viewpoint name" aria-label="Viewpoint name">
+<div class="actions"><button id="save-view">Save</button><button id="share-view">Copy link</button></div>
+<select id="saved-views" aria-label="Saved viewpoints"><option value="">Saved viewpoints</option></select>
+<button id="delete-view">Delete selected viewpoint</button>
+<p id="view-message" class="help" role="status"></p>
+<details><summary>Data and limitations</summary><p><a href="https://svs.gsfc.nasa.gov/4720/" target="_blank" rel="noopener">NASA SVS · LROC and LOLA</a></p><p><a href="https://svs.gsfc.nasa.gov/3654/" target="_blank" rel="noopener">NASA · LCROSS impact site</a></p><p><a href="https://www.lpi.usra.edu/lunar/missions/clementine/data/" target="_blank" rel="noopener">LPI · Clementine composition</a></p><p id="data-quality">Global LOLA terrain is sampled at 4 points/degree. Local tiles use 16 points/degree (about 1.9 km at the equator). Source terrain and imagery have different resolutions.</p><p>Coordinates use east-positive longitude on a 1737.4 km lunar reference sphere. Local terrain may be interpolated. Resource maps are published color visualizations; no pixel-level abundance readout is available.</p><p id="sky-quality" class="help"></p><p>Sky uses Astronomy Engine and a bundled d3-celestial bright-star catalog. Terrain shadows are optional; orbit and illumination are approximate. Time controls cover 1900–2100. This viewer has no operational navigation validation.</p></details>
 </aside>
 <section id="view" aria-label="3D lunar viewer">
 <div id="scene" tabindex="0" aria-label="Click terrain to pick coordinates. Drag or use arrow keys to rotate. Scroll to zoom."></div><div id="annotations"></div>
 <div class="readout"><b id="mode">ORBITAL VIEW</b><span id="position"></span><span id="status" role="status">Loading lunar data…</span></div>
+<div id="scale" hidden><span id="scale-label"></span><div id="scale-line"></div></div>
 <div class="tools"><div id="compass" aria-label="Compass"><span>N</span><b id="needle">▲</b><output id="bearing">000°</output></div><button id="in" aria-label="Zoom in">+</button><button id="out" aria-label="Zoom out">−</button></div>
-<div class="timeline"><label for="clock">SKY TIME <span>UTC</span></label><div><button id="back" aria-label="Back one hour">−1h</button><input id="clock" type="datetime-local" aria-label="Simulation date and time in UTC"><button id="forward" aria-label="Forward one hour">+1h</button><button id="live" aria-pressed="false">Live</button><button id="map" aria-pressed="true">Map light</button><button id="fly" aria-pressed="false">Fly orbit</button></div></div>
+<div class="timeline"><label for="clock">SKY TIME <span>UTC</span></label><div><button id="back" aria-label="Back one hour">−1h</button><input id="clock" type="datetime-local" min="1900-01-01T00:00" max="2100-12-31T23:59" aria-label="Simulation date and time in UTC"><button id="forward" aria-label="Forward one hour">+1h</button><button id="live" aria-pressed="false">Live</button><button id="map" aria-pressed="true">Map light</button><button id="fly" aria-pressed="false">Fly orbit</button></div></div>
 </section></main>
 <dialog id="mission-media" aria-labelledby="mission-media-title">
 <form method="dialog"><button aria-label="Close mission media">Close</button></form>
 <h2 id="mission-media-title"></h2>
-<p>Explore mission imagery and videos using these sources. Search results may include related missions or artist illustrations.</p>
+<p id="mission-media-intro">Explore mission imagery and videos using these sources. Search results may include related missions or artist illustrations.</p>
 <div id="mission-media-links"></div>
-</dialog><script src="astronomy.js"></script><script type="module" src="atlas.mjs?v=missions-8"></script>
+</dialog><script src="astronomy.js"></script><script type="module" src="atlas.mjs?v=navigation-2"></script>
 </html>

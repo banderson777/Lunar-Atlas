@@ -1,0 +1,15 @@
+{
+  "source": "https://svs.gsfc.nasa.gov/4720/",
+  "download": "https://svs.gsfc.nasa.gov/vis/a000000/a004700/a004720/ldem_16.tif",
+  "instrument": "LRO LOLA",
+  "reference_radius_km": 1737.4,
+  "samples_per_degree": 16,
+  "source_dimensions": [5760, 2880],
+  "tile_dimensions": [162, 162],
+  "tile_count": [36, 18],
+  "tile_core_samples": 160,
+  "border_samples": 1,
+  "encoding": "gzip-compressed little-endian Int16, each integer is 0.5 metres relative to reference sphere",
+  "processing": "Source float32 kilometres were rounded to half metres. Source pixel centers are retained. One overlapping sample per edge supports bilinear interpolation. Longitude wraps and latitude clamps.",
+  "prepared": "2026-11-18"
+}
